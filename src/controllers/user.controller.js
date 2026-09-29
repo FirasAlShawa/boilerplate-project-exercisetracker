@@ -1,13 +1,11 @@
+import mongoose from "mongoose";
 import Exercise from "../data/exercise.data.js";
 import User from "../data/user.data.js";
 
 export default class UserController {
   static async createNewUser(req, res) {
-    console.log(req.body);
-
     const { username } = req.body || {};
 
-    // || username.length <= 0
     if (!username) {
       res.status(400).json({ error: "Username is required!" });
       return;
@@ -15,17 +13,16 @@ export default class UserController {
 
     const user = await User.create({ username });
 
-    res.json({
-      username: username,
-      id: user._id,
-    });
+    res.json({ username: user.username, _id: user._id });
+  }
+
+  static async getAllUsers(req, res) {
+    const users = await User.find({}).select("_id username");
+    res.json(users);
   }
 
   static async getUserDetails(req, res) {
-    const { id } = req.params;
-    console.log(id);
-
-    const user = await User.findOne({ _id: id });
+    const user = await UserController.findUser(req.params.id);
     if (!user) {
       res.status(404).json({ error: "User not found!" });
       return;
@@ -35,58 +32,92 @@ export default class UserController {
   }
 
   static async addNewExercisToUser(req, res) {
-    const { description, duration, date } = req.body;
+    const { description, duration, date } = req.body || {};
     const id = req.params.id;
 
     const user = await UserController.findUser(id);
+    if (!user) {
+      res.status(404).json({ error: "User not found!" });
+      return;
+    }
+
+    if (!description || !duration || isNaN(Number(duration))) {
+      res.status(400).json({ error: "description and numeric duration are required!" });
+      return;
+    }
+
+    const exerciseDate = date ? UserController.parseDate(date) : new Date();
+    if (!exerciseDate) {
+      res.status(400).json({ error: "Invalid date!" });
+      return;
+    }
 
     const exercise = await Exercise.create({
-      userId: id,
+      userId: user._id,
       description,
-      duration,
-      date: UserController.formatToCustomString(date),
+      duration: Number(duration),
+      date: exerciseDate,
     });
 
-    res.json({ username: user.username, ...exercise.toObject() });
+    res.json({
+      _id: user._id,
+      username: user.username,
+      date: exercise.date.toDateString(),
+      duration: exercise.duration,
+      description: exercise.description,
+    });
   }
 
   static async userLogs(req, res) {
     const id = req.params.id;
+    const { from, to, limit } = req.query;
 
     const user = await UserController.findUser(id);
-    const [documents, totalCount] = await Exercise.findAndCount(
-      {
-        userId: id,
-      },
-      null,
-      { sort: { _id: -1 }, limit: 10, skip: 0 },
-    );
+    if (!user) {
+      res.status(404).json({ error: "User not found!" });
+      return;
+    }
 
-    const logs = documents.map((single) =>{
-      return {description:single.description, duration:single.duration, date:single.date};
-    });
+    const filter = { userId: user._id };
+    const fromDate = from && UserController.parseDate(from);
+    const toDate = to && UserController.parseDate(to);
+    if (fromDate || toDate) {
+      filter.date = {};
+      if (fromDate) filter.date.$gte = fromDate;
+      if (toDate) filter.date.$lte = toDate;
+    }
+
+    let query = Exercise.find(filter).sort({ date: 1 });
+    const limitNum = parseInt(limit);
+    if (limitNum > 0) query = query.limit(limitNum);
+
+    const documents = await query;
+
+    const log = documents.map((single) => ({
+      description: single.description,
+      duration: single.duration,
+      date: single.date.toDateString(),
+    }));
 
     res.json({
-      username: user.username,
-      count: totalCount,
       _id: user._id,
-      log: [logs],
+      username: user.username,
+      count: log.length,
+      log,
     });
   }
 
   static async findUser(id) {
-    return await User.findOne({ _id: id });
+    if (!mongoose.isValidObjectId(id)) return null;
+    return await User.findById(id);
   }
 
-  static formatToCustomString(dateStr) {
-    const [year, month, day] = dateStr.split("-");
-    // Month is 0-indexed in JS Date (0 = January, 11 = December)
-    const date = new Date(year, month - 1, day);
-
-    const weekday = date.toLocaleDateString("en-US", { weekday: "short" });
-    const monthStr = date.toLocaleDateString("en-US", { month: "short" });
-    const paddedDay = String(day).padStart(2, "0");
-
-    return `${weekday} ${monthStr} ${paddedDay} ${year}`;
+  // Parses "yyyy-mm-dd" as a local date so toDateString() doesn't shift a day
+  static parseDate(dateStr) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+    const date = match
+      ? new Date(match[1], match[2] - 1, match[3])
+      : new Date(dateStr);
+    return isNaN(date.getTime()) ? null : date;
   }
 }
